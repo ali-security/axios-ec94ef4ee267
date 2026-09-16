@@ -1,6 +1,7 @@
 var utils = require('../../../lib/utils');
 var mergeConfig = require('../../../lib/core/mergeConfig');
 var defaults = require('../../../lib/defaults');
+var validator = require('../../../lib/helpers/validator');
 
 describe('Prototype Pollution Protection', function() {
   afterEach(function() {
@@ -15,6 +16,22 @@ describe('Prototype Pollution Protection', function() {
     delete Object.prototype.adapter;
     delete Object.prototype.validateStatus;
     delete Object.prototype.data;
+    delete Object.prototype.auth;
+    delete Object.prototype.username;
+    delete Object.prototype.password;
+    delete Object.prototype.baseURL;
+    delete Object.prototype.url;
+    delete Object.prototype.allowAbsoluteUrls;
+    delete Object.prototype.socketPath;
+    delete Object.prototype.beforeRedirect;
+    delete Object.prototype.insecureHTTPParser;
+    delete Object.prototype.xsrfHeaderName;
+    delete Object.prototype.xsrfCookieName;
+    delete Object.prototype.withXSRFToken;
+    delete Object.prototype.headers;
+    delete Object.prototype.params;
+    delete Object.prototype.paramsSerializer;
+    delete Object.prototype.timeout;
   });
 
   describe('utils.merge', function() {
@@ -292,6 +309,137 @@ describe('Prototype Pollution Protection', function() {
       expect(result.timeout).toEqual(5000);
       expect(result.headers.common.Accept).toEqual('application/json');
       expect(result.headers.common['Content-Type']).toEqual('application/json');
+    });
+  });
+
+  // GHSA-q8qp-cvcw-x6jj: mergeConfig now returns a null-prototype object, so a
+  // property that is not an own property of the merged config can never be
+  // supplied by a polluted Object.prototype.
+  describe('mergeConfig null-prototype structure', function() {
+    it('should return an object whose prototype is null', function() {
+      var merged = mergeConfig({url: '/x'}, {method: 'get'});
+
+      expect(Object.getPrototypeOf(merged)).toBe(null);
+    });
+
+    it('should preserve hasOwnProperty as a callable own slot', function() {
+      var merged = mergeConfig({}, {url: '/x', method: 'get'});
+
+      expect(typeof merged.hasOwnProperty).toEqual('function');
+      expect(merged.hasOwnProperty('url')).toBe(true);
+      expect(merged.hasOwnProperty('method')).toBe(true);
+      expect(merged.hasOwnProperty('bogus')).toBe(false);
+    });
+
+    it('should not expose the hasOwnProperty slot as an enumerable key', function() {
+      var merged = mergeConfig({}, {url: '/x'});
+
+      expect(Object.keys(merged).indexOf('hasOwnProperty')).toEqual(-1);
+      expect(JSON.stringify(merged)).toEqual('{"url":"/x"}');
+    });
+
+    it('should not read arbitrary polluted keys off the merged config', function() {
+      Object.prototype.polluted = 'attacker';
+      Object.prototype.baseURL = 'http://attacker.example.com';
+      Object.prototype.auth = {username: 'attacker', password: 'exfil'};
+      Object.prototype.socketPath = '/tmp/attacker.sock';
+      Object.prototype.beforeRedirect = function() {};
+      Object.prototype.insecureHTTPParser = true;
+
+      var merged = mergeConfig({url: '/x'}, {});
+
+      expect(merged.polluted).toBeUndefined();
+      expect(merged.baseURL).toBeUndefined();
+      expect(merged.auth).toBeUndefined();
+      expect(merged.socketPath).toBeUndefined();
+      expect(merged.beforeRedirect).toBeUndefined();
+      expect(merged.insecureHTTPParser).toBeUndefined();
+    });
+  });
+
+  // GHSA-q8qp-cvcw-x6jj: assertOptions used to look the validator up through
+  // the prototype chain, so a polluted Object.prototype.<option> supplied a
+  // non-function "validator" and produced a TypeError instead of the documented
+  // AxiosError.
+  describe('validator.assertOptions', function() {
+    it('should not take a validator inherited from Object.prototype', function() {
+      Object.prototype.polluted = 'not a function';
+
+      var thrown = null;
+      try {
+        validator.assertOptions({polluted: true}, {}, false);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).not.toBe(null);
+      expect(thrown.code).toEqual('ERR_BAD_OPTION');
+      expect(thrown.message).toEqual('Unknown option polluted');
+    });
+
+    it('should not throw for an unknown option when allowUnknown is set', function() {
+      Object.prototype.polluted = 'not a function';
+
+      var thrown = null;
+      try {
+        validator.assertOptions({polluted: true}, {}, true);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBe(null);
+    });
+
+    it('should still run validators that the schema owns', function() {
+      var thrown = null;
+      try {
+        validator.assertOptions({silentJSONParsing: 'nope'}, {
+          silentJSONParsing: validator.validators.boolean
+        }, false);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).not.toBe(null);
+      expect(thrown.code).toEqual('ERR_BAD_OPTION_VALUE');
+    });
+  });
+
+  // The browser adapter reads the same fields; an inherited value must never
+  // reach the XMLHttpRequest.
+  describe('xhr adapter', function() {
+    beforeEach(function() {
+      jasmine.Ajax.install();
+    });
+
+    afterEach(function() {
+      jasmine.Ajax.uninstall();
+    });
+
+    it('should not send an Authorization header inherited from Object.prototype', function(done) {
+      Object.prototype.auth = {username: 'attacker', password: 'exfil'};
+
+      axios('/foo');
+
+      setTimeout(function() {
+        var request = jasmine.Ajax.requests.mostRecent();
+
+        expect(request.requestHeaders['Authorization']).toBeUndefined();
+        done();
+      }, 100);
+    });
+
+    it('should not prefix the request url with a baseURL inherited from Object.prototype', function(done) {
+      Object.prototype.baseURL = 'http://attacker.example.com';
+
+      axios('/foo');
+
+      setTimeout(function() {
+        var request = jasmine.Ajax.requests.mostRecent();
+
+        expect(request.url).toEqual('/foo');
+        done();
+      }, 100);
     });
   });
 
