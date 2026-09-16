@@ -22,6 +22,7 @@ describe('supports http with nodejs', function () {
     delete Object.prototype.proxy;
     delete Object.prototype.socketPath;
     delete Object.prototype.allowedSocketPaths;
+    delete Object.prototype.transport;
   }
 
   // Defensive: clear before each test in case another suite left pollution.
@@ -1438,6 +1439,33 @@ describe('supports http with nodejs', function () {
           clearPrototypePollution();
           done(err);
         });
+      });
+    });
+  });
+
+  it('should not use a transport inherited from Object.prototype', function (done) {
+    var transportCalls = 0;
+
+    server = http.createServer(function (req, res) {
+      res.end('direct');
+    }).listen(4444, function () {
+      Object.prototype.transport = {
+        request: function () {
+          transportCalls += 1;
+          return http.request.apply(http, arguments);
+        }
+      };
+
+      axios.get('http://localhost:4444/', {
+        maxRedirects: 0
+      }).then(function (res) {
+        clearPrototypePollution();
+        assert.equal(res.data, 'direct');
+        assert.equal(transportCalls, 0, 'should not issue the request through an inherited transport');
+        done();
+      }).catch(function (err) {
+        clearPrototypePollution();
+        done(err);
       });
     });
   });
